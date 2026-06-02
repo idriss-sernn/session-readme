@@ -7,102 +7,405 @@
 <script>
   const isWebKit = window.webkit?.messageHandlers?.live;
   const isWebView2 = window.chrome?.webview;
+  const d = __PAYLOAD__;
+  let currentNote = d.note;
+  let currentStatus = d.status || "wip";
+  let editMode = false;
+  let historyMode = false;
+
+  const STATUS_COLORS = {
+    wip: "#ff7c00",
+    mastering: "#4da6ff",
+    ready: "#5dba6e",
+    done: "#c874c8",
+  };
 
   function send(msg) {
     if (isWebKit) window.webkit.messageHandlers.live.postMessage(msg);
     else if (isWebView2) window.chrome.webview.postMessage(msg);
   }
 
-  function save() {
-    const note = document.getElementById('note').value;
-    send({ method: "close_and_send", params: [JSON.stringify({ action: "save", note })] });
+  function closeDialog(action, note = null) {
+    const content = note !== null
+      ? note
+      : (editMode
+        ? document.getElementById('editor').value
+        : serializeChecklist());
+
+    if (action === "export") {
+      showNotification("Exported to Desktop!");
+      setTimeout(() => {
+        send({ method: "close_and_send", params: [JSON.stringify({ action, note: content, status: currentStatus })] });
+      }, 800);
+    } else {
+      send({ method: "close_and_send", params: [JSON.stringify({ action, note: content, status: currentStatus })] });
+    }
   }
 
-  function discard() {
-    send({ method: "close_and_send", params: [JSON.stringify({ action: "discard" })] });
+  function showNotification(msg) {
+    let notif = document.getElementById('notification');
+    if (!notif) {
+      notif = document.createElement('div');
+      notif.id = 'notification';
+      notif.className = 'notification';
+      document.body.appendChild(notif);
+    }
+    notif.textContent = msg;
+    notif.style.display = 'block';
+    setTimeout(() => notif.style.display = 'none', 1500);
+  }
+
+  // ── Checklist rendering ──────────────────────────────────────────────────
+
+  function renderChecklist(text) {
+    const lines = text.split('\n');
+    const container = document.getElementById('checklist');
+    container.innerHTML = '';
+
+    lines.forEach((line, i) => {
+      const div = document.createElement('div');
+      div.className = 'line';
+
+      const unchecked = line.match(/^(\s*)\[ \] (.*)$/);
+      const checked   = line.match(/^(\s*)\[x\] (.*)$/i);
+
+      if (unchecked || checked) {
+        const isChecked = !!checked;
+        const indent = (unchecked || checked)[1];
+        const text   = (unchecked || checked)[2];
+
+        div.innerHTML = `
+          <label class="check-line" style="padding-left:${indent.length * 8}px">
+            <input type="checkbox" data-idx="${i}" ${isChecked ? 'checked' : ''}>
+            <span class="${isChecked ? 'done' : ''}">${escHtml(text)}</span>
+          </label>`;
+
+        div.querySelector('input').addEventListener('change', e => {
+          toggleCheck(i, e.target.checked);
+        });
+      } else {
+        div.className = 'line text-line';
+        div.textContent = line || ' ';
+      }
+
+      container.appendChild(div);
+    });
+
+    updateCounter();
+  }
+
+  function toggleCheck(lineIdx, checked) {
+    const lines = serializeChecklist().split('\n');
+    const line = lines[lineIdx];
+    if (checked) {
+      lines[lineIdx] = line.replace(/\[ \]/, '[x]');
+    } else {
+      lines[lineIdx] = line.replace(/\[x\]/i, '[ ]');
+    }
+    currentNote = lines.join('\n');
+    renderChecklist(currentNote);
+  }
+
+  function serializeChecklist() {
+    return currentNote;
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function updateCounter() {
+    const total = (currentNote.match(/\[[ x]\]/gi) || []).length;
+    const done  = (currentNote.match(/\[x\]/gi) || []).length;
+    document.getElementById('counter').textContent =
+      total > 0 ? `${done}/${total} done` : `${currentNote.length} chars`;
+  }
+
+  // ── Edit mode toggle ─────────────────────────────────────────────────────
+
+  function toggleEdit() {
+    editMode = !editMode;
+    historyMode = false;
+    const editor    = document.getElementById('editor');
+    const checklist = document.getElementById('checklist');
+    const history   = document.getElementById('history');
+    const btn       = document.getElementById('btn-edit');
+
+    if (editMode) {
+      editor.value = currentNote;
+      editor.style.display = 'block';
+      checklist.style.display = 'none';
+      history.style.display = 'none';
+      btn.textContent = 'Preview';
+      editor.focus();
+    } else {
+      currentNote = editor.value;
+      editor.style.display = 'none';
+      checklist.style.display = 'block';
+      history.style.display = 'none';
+      btn.textContent = 'Edit';
+      renderChecklist(currentNote);
+    }
+  }
+
+  function toggleHistory() {
+    historyMode = !historyMode;
+    editMode = false;
+    const editor    = document.getElementById('editor');
+    const checklist = document.getElementById('checklist');
+    const history   = document.getElementById('history');
+    const btn       = document.getElementById('btn-history');
+
+    if (historyMode) {
+      editor.style.display = 'none';
+      checklist.style.display = 'none';
+      history.style.display = 'block';
+      btn.textContent = 'Close';
+      renderHistory();
+    } else {
+      editor.style.display = 'none';
+      checklist.style.display = 'block';
+      history.style.display = 'none';
+      btn.textContent = 'History';
+    }
+  }
+
+  function renderHistory() {
+    const container = document.getElementById('history');
+    container.innerHTML = '';
+
+    if (d.history.length === 0) {
+      container.innerHTML = '<div class="empty">No history</div>';
+      return;
+    }
+
+    d.history.forEach((item, idx) => {
+      const div = document.createElement('div');
+      div.className = 'history-item';
+      const preview = item.content.substring(0, 60).replace(/\n/g, ' ');
+      div.innerHTML = `
+        <div class="history-time">${item.timestamp}</div>
+        <div class="history-preview">${escHtml(preview)}${item.content.length > 60 ? '…' : ''}</div>
+        <button data-idx="${idx}">Restore</button>
+      `;
+      const btn = div.querySelector('button');
+      btn.addEventListener('click', () => restoreVersion(idx, item.content));
+      container.appendChild(div);
+    });
+  }
+
+  function restoreVersion(idx, content) {
+    currentNote = content;
+    historyMode = false;
+    editMode = false;
+    document.getElementById('editor').style.display = 'none';
+    document.getElementById('checklist').style.display = 'block';
+    document.getElementById('history').style.display = 'none';
+    document.getElementById('btn-history').textContent = 'History';
+    renderChecklist(currentNote);
+  }
+
+  function insertChecklist() {
+    if (!editMode) toggleEdit();
+    const ta = document.getElementById('editor');
+    const pos = ta.selectionStart;
+    const before = ta.value.substring(0, pos);
+    const after  = ta.value.substring(pos);
+    const insert = (before.endsWith('\n') || before === '' ? '' : '\n') + '[ ] ';
+    ta.value = before + insert + after;
+    ta.selectionStart = ta.selectionEnd = pos + insert.length;
+    ta.focus();
+  }
+
+  function insertTemplate(name) {
+    const templates = {
+      premix: `[ ] Balance levels
+[ ] Check EQ
+[ ] Compress drums
+[ ] Comp/limit master
+[ ] Reference checks
+[ ] Export stems`,
+      preexport: `[ ] Final mix bounce
+[ ] Stem exports (drums/bass/melodic/fx)
+[ ] Metadata tagging
+[ ] File organization
+[ ] Backup to vault`,
+      review: `[ ] What worked
+[ ] What didn't
+[ ] Next session todo
+[ ] Reference tracks
+[ ] Inspiration ideas`,
+    };
+
+    const template = templates[name] || '';
+    if (!editMode) toggleEdit();
+    currentNote = currentNote ? currentNote + '\n\n' + template : template;
+    document.getElementById('editor').value = currentNote;
+  }
+
+  function insertLink() {
+    if (!editMode) toggleEdit();
+    const url = prompt('Paste URL:');
+    if (!url) return;
+
+    const label = prompt('Link label (YouTube, Spotify, etc):') || 'Ref';
+    const link = `[${label}](${url})`;
+    const ta = document.getElementById('editor');
+    const pos = ta.selectionStart;
+    const before = ta.value.substring(0, pos);
+    const after  = ta.value.substring(pos);
+    const insert = (before.endsWith('\n') || before === '' ? '' : '\n') + link;
+    ta.value = before + insert + after;
+    ta.selectionStart = ta.selectionEnd = pos + insert.length;
+    ta.focus();
+  }
+
+  function updateDotColor() {
+    const dot = document.querySelector('.dot');
+    dot.style.background = STATUS_COLORS[currentStatus] || STATUS_COLORS.wip;
   }
 
   window.onload = () => {
-    const note = __NOTE__;
-    const label = __LABEL__;
-    document.getElementById('label').textContent = label;
-    document.getElementById('note').value = note;
-    document.getElementById('note').focus();
+    document.getElementById('label').textContent = d.label;
+    document.getElementById('meta').textContent  = `${d.tempo} BPM · ${d.tracks} tracks`;
+    document.getElementById('status-select').value = currentStatus;
+    updateDotColor();
 
-    // Ctrl+S / Cmd+S pour sauvegarder
-    document.addEventListener('keydown', e => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-        e.preventDefault();
-        save();
-      }
-      if (e.key === 'Escape') discard();
+    renderChecklist(currentNote);
+
+    document.getElementById('status-select').addEventListener('change', e => {
+      currentStatus = e.target.value;
+      updateDotColor();
     });
 
-    // Compteur de caractères
-    const counter = document.getElementById('counter');
-    const textarea = document.getElementById('note');
-    const update = () => counter.textContent = `${textarea.value.length} chars`;
-    textarea.addEventListener('input', update);
-    update();
+    document.addEventListener('keydown', e => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); closeDialog('save'); }
+      if (e.key === 'Escape') closeDialog('discard');
+    });
   };
 </script>
 <style>
   :root {
     --bg: #282828; --panel: #333; --border: #1e1e1e;
     --text: #d4d4d4; --subtle: #777; --accent: #ff7c00;
+    --green: #5dba6e;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     background: var(--bg); color: var(--text);
     font-family: -apple-system, 'Helvetica Neue', sans-serif;
-    font-size: 13px; height: 100vh;
-    display: flex; flex-direction: column;
+    font-size: 13px; height: 100vh; display: flex; flex-direction: column;
   }
   header {
-    padding: 12px 16px; background: var(--panel);
+    padding: 10px 14px; background: var(--panel);
     border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 8px;
   }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
-  header h1 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); }
-  #label { font-size: 12px; color: var(--subtle); margin-left: auto; }
-  textarea {
-    flex: 1; background: var(--bg); color: var(--text);
-    border: none; outline: none; resize: none;
-    padding: 16px; font-size: 13px; line-height: 1.6;
-    font-family: inherit;
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  #label { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--accent); }
+  #meta  { color: var(--subtle); font-size: 11px; margin-left: auto; }
+  .status-select {
+    background: var(--panel); color: var(--text);
+    border: 1px solid #444; padding: 3px 8px;
+    font-size: 11px; border-radius: 2px; cursor: pointer;
+    margin-left: 8px;
   }
-  textarea::placeholder { color: var(--subtle); }
+  .status-select:hover { border-color: #666; }
+  .toolbar {
+    padding: 6px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex; gap: 6px;
+  }
+  .tb-btn {
+    border: 1px solid #444; background: transparent; color: var(--subtle);
+    padding: 3px 10px; font-size: 11px; cursor: pointer; border-radius: 2px;
+  }
+  .tb-btn:hover { color: var(--text); border-color: #666; }
+  .content { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  #checklist { min-height: 100%; }
+  #history { display: none; }
+  .history-item {
+    padding: 8px; margin: 6px 0; background: rgba(255, 124, 0, 0.08);
+    border-left: 3px solid var(--accent); border-radius: 2px;
+  }
+  .history-time { font-size: 11px; color: var(--accent); font-weight: 600; }
+  .history-preview { color: var(--subtle); font-size: 12px; margin: 4px 0; }
+  .history-item button {
+    padding: 3px 8px; font-size: 10px; background: var(--accent); color: #000;
+    border: none; border-radius: 2px; cursor: pointer; margin-top: 4px;
+  }
+  .history-item button:hover { opacity: 0.85; }
+  .empty { text-align: center; color: var(--subtle); padding: 20px; }
+  .line { min-height: 20px; line-height: 20px; }
+  .text-line { color: var(--text); white-space: pre-wrap; word-break: break-word; }
+  .check-line {
+    display: flex; align-items: flex-start; gap: 7px;
+    cursor: pointer; padding: 1px 0;
+  }
+  .check-line input[type=checkbox] { margin-top: 3px; accent-color: var(--accent); flex-shrink: 0; }
+  .check-line span { line-height: 1.5; }
+  .done { color: var(--subtle); text-decoration: line-through; }
+  #editor {
+    display: none; width: 100%; height: 100%;
+    background: transparent; color: var(--text);
+    border: none; outline: none; resize: none;
+    font-size: 13px; line-height: 1.6; font-family: inherit;
+  }
+  #editor::placeholder { color: var(--subtle); }
   footer {
-    padding: 10px 16px; border-top: 1px solid var(--border);
-    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 6px;
   }
   #counter { color: var(--subtle); font-size: 11px; margin-right: auto; }
-  .hint { color: var(--subtle); font-size: 11px; }
   button {
-    border: none; padding: 5px 14px; font-size: 12px;
+    border: none; padding: 4px 12px; font-size: 12px;
     font-weight: 600; cursor: pointer; border-radius: 2px;
   }
-  .btn-save { background: var(--accent); color: #000; }
-  .btn-save:hover { opacity: 0.85; }
-  .btn-discard { background: var(--panel); color: var(--subtle); }
-  .btn-discard:hover { color: var(--text); }
+  .btn-save   { background: var(--accent); color: #000; }
+  .btn-export { background: rgba(77,166,255,0.2); color: #4da6ff; border: 1px solid #4da6ff; }
+  .btn-cancel { background: var(--panel); color: var(--subtle); }
+  .btn-save:hover   { opacity: 0.85; }
+  .btn-export:hover { background: rgba(77,166,255,0.35); }
+  .btn-cancel:hover { color: var(--text); }
+  #notification {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--green); color: #000;
+    padding: 10px 16px; border-radius: 4px;
+    font-size: 12px; font-weight: 600;
+    display: none; z-index: 999;
+  }
 </style>
 </head>
 <body>
 <header>
   <div class="dot"></div>
-  <h1>Session Note</h1>
   <span id="label"></span>
+  <span id="meta"></span>
+  <select id="status-select" class="status-select">
+    <option value="wip">WIP</option>
+    <option value="mastering">Mastering</option>
+    <option value="ready">Mix Ready</option>
+    <option value="done">Stems Done</option>
+  </select>
 </header>
-<textarea
-  id="note"
-  placeholder="What are you working on? What's next? What's not working yet?&#10;&#10;This note stays with this session."></textarea>
+<div class="toolbar">
+  <button class="tb-btn" onclick="insertChecklist()">+ Task</button>
+  <button class="tb-btn" onclick="insertLink()">+ Link</button>
+  <button class="tb-btn" onclick="insertTemplate('premix')">Pre-Mix</button>
+  <button class="tb-btn" onclick="insertTemplate('preexport')">Pre-Export</button>
+  <button class="tb-btn" id="btn-edit" onclick="toggleEdit()">Edit</button>
+  <button class="tb-btn" id="btn-history" onclick="toggleHistory()">History</button>
+</div>
+<div class="content">
+  <div id="checklist"></div>
+  <textarea id="editor" placeholder="Write anything...&#10;&#10;Use [ ] for tasks, [x] for done."></textarea>
+  <div id="history"></div>
+</div>
 <footer>
   <span id="counter"></span>
-  <span class="hint">⌘S to save · Esc to close</span>
-  <button class="btn-discard" onclick="discard()">Cancel</button>
-  <button class="btn-save" onclick="save()">Save</button>
+  <button class="btn-cancel" onclick="closeDialog('discard')">Cancel</button>
+  <button class="btn-export"  onclick="closeDialog('export')">Export</button>
+  <button class="btn-save"   onclick="closeDialog('save')">Save  ⌘S</button>
 </footer>
 </body>
 </html>
